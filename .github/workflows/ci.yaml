@@ -222,3 +222,9 @@ jobs:
           git add sunny
           git commit -m "sunny: Update certified fingerprint"
           git push origin HEAD
+
+          tg() { curl -sX POST https://api.telegram.org/bot${{ secrets.TG_TOKEN }}/sendMessage -d chat_id=$1 -d text=$'New Certified Props has been pushed in YAAP. Use OpenDelta (YAAP Updater) to update it.\n\nSteps to do it are specified in the #yaap_pi note.\n\nFor the lazy dimwits who can\'t be arsed to check the note here are the steps for yall:\n\nSettings -> System -> YAAP Updater -> Click three dots -> Settings -> Scroll down to Props update and click it -> Click Props status and click update to install the new props and reboot to pass PI :)'; }
+
+          tg -1001864778887 # G54 Updates
+          tg -1002005479847 # G64 Updates
+          tg -1001729337901 # Fries
