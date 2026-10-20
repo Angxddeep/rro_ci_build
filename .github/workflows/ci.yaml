@@ -1,10 +1,10 @@
-name: Build CertifiedPropsOverlay
+name: Build CertifiedPropsOverlay for PixelOS
 
 on:
   workflow_dispatch:
-   inputs:
+    inputs:
       push:
-        description: 'Push to repo?'
+        description: 'Push to OTA repo?'
         type: boolean
         required: true
         default: true
@@ -12,7 +12,10 @@ on:
     - cron: '0 * * * *'
 
 env:
-  GH_USERNAME: sarthakroy2002
+  GH_USERNAME: Angxddeep
+  OTA_REPO: Angxddeep/PIXELOS-OTA
+  PIXELOS_VERSION: seventeen
+  TARGET_DEVICES: "xaga spes"
 
 permissions:
   contents: write
@@ -22,42 +25,65 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_push: ${{ steps.compare.outputs.should_push }}
-      latest_ver: ${{ steps.latest.outputs.latest_ver }}
-      current_ver: ${{ steps.latest.outputs.current_ver }}
+      latest_fp: ${{ steps.latest.outputs.latest_fp }}
+      current_fp: ${{ steps.latest.outputs.current_fp }}
 
     steps:
-      - name: Fetch latest and current version
+      - name: Fetch latest upstream and current deployed props
         id: latest
         run: |
           set -euo pipefail
 
-          latestver=$(curl -fsSL https://github.com/yaap/vendor_yaap/raw/seventeen/overlay/CertifiedPropsOverlay/AndroidManifest.xml | grep -oP 'versionName="\K[^"]+')
-          currentver=$(curl -fsSL https://github.com/yaap/ota-info/raw/full-signed/cancunf/cert.json | jq -r '.version')
+          UPSTREAM_URL="https://raw.githubusercontent.com/PixelOS-AOSP/official_devices/${PIXELOS_VERSION}/API/updater/CertifiedProps/certified_build_props.json"
+          CURRENT_URL="https://raw.githubusercontent.com/${OTA_REPO}/xaga/certified_build_props.json"
 
-          echo "latest_ver=${latestver}" >> "$GITHUB_OUTPUT"
-          echo "current_ver=${currentver}" >> "$GITHUB_OUTPUT"
+          latest_json=$(curl -fsSL "$UPSTREAM_URL")
+          latest_fp=$(echo "$latest_json" | jq -r '.FINGERPRINT // empty')
 
-      - name: Compare against current version
+          current_json=$(curl -fsSL "$CURRENT_URL" 2>/dev/null || echo "{}")
+          current_fp=$(echo "$current_json" | jq -r '.FINGERPRINT // empty')
+
+          echo "Latest upstream fingerprint: $latest_fp"
+          echo "Current deployed fingerprint: $current_fp"
+
+          echo "latest_fp=${latest_fp}" >> "$GITHUB_OUTPUT"
+          echo "current_fp=${current_fp}" >> "$GITHUB_OUTPUT"
+
+      - name: Compare versions
         id: compare
         env:
-          LATEST_VER: ${{ steps.latest.outputs.latest_ver }}
-          CURRENT_VER: ${{ steps.latest.outputs.current_ver }}
+          LATEST_FP: ${{ steps.latest.outputs.latest_fp }}
+          CURRENT_FP: ${{ steps.latest.outputs.current_fp }}
           EVENT_NAME: ${{ github.event_name }}
           PUSH_INPUT: ${{ github.event.inputs.push }}
         run: |
           set -euo pipefail
 
-          if [ "$CURRENT_VER" != "$LATEST_VER" ]; then
-            echo "Detected upstream CertifiedPropsOverlay changes"
-            if [[ $EVENT_NAME == 'workflow_dispatch' && $PUSH_INPUT == 'false' ]]; then
-                echo "Push disabled by user input"
-                echo "should_push=false" >> "$GITHUB_OUTPUT"
+          if [ -z "$LATEST_FP" ]; then
+            echo "Error: Failed to fetch upstream fingerprint"
+            exit 1
+          fi
+
+          if [ "$CURRENT_FP" != "$LATEST_FP" ]; then
+            echo "Detected upstream CertifiedProps changes"
+            if [[ "$EVENT_NAME" == 'workflow_dispatch' && "$PUSH_INPUT" == 'false' ]]; then
+              echo "Push disabled by user input"
+              echo "should_push=false" >> "$GITHUB_OUTPUT"
             else
-                echo "should_push=true" >> "$GITHUB_OUTPUT"
+              echo "should_push=true" >> "$GITHUB_OUTPUT"
             fi
           else
-            echo "Current CertifiedPropsOverlay version already match upstream version"
-            echo "should_push=false" >> "$GITHUB_OUTPUT"
+            echo "Current deployed fingerprint already matches upstream"
+            if [[ "$EVENT_NAME" == 'workflow_dispatch' ]]; then
+              echo "Manual trigger running build"
+              if [[ "$PUSH_INPUT" == 'false' ]]; then
+                echo "should_push=false" >> "$GITHUB_OUTPUT"
+              else
+                echo "should_push=true" >> "$GITHUB_OUTPUT"
+              fi
+            else
+              echo "should_push=false" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
   build:
@@ -66,11 +92,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
@@ -83,82 +117,75 @@ jobs:
           sdkmanager "build-tools;35.0.0"
           sdkmanager "platforms;android-36"
 
-      - name: Clone YAAP vendor repo
+      - name: Fetch upstream CertifiedProps JSON
         run: |
-          git clone --depth=1 \
-            https://github.com/yaap/vendor_yaap.git -b seventeen
+          curl -fsSL "https://raw.githubusercontent.com/PixelOS-AOSP/official_devices/${PIXELOS_VERSION}/API/updater/CertifiedProps/certified_build_props.json" \
+            -o certified_build_props.json
 
-      - name: Setup certs
-        env:
-          GMS_CERT_PRIV: ${{ secrets.GMS_CERT_PRIV }}
-          GMS_CERT_PUB: ${{ secrets.GMS_CERT_PUB }}
-          VANILLA_CERT_PRIV: ${{ secrets.VANILLA_CERT_PRIV }}
-          VANILLA_CERT_PUB: ${{ secrets.VANILLA_CERT_PUB }}
+      - name: Generate Overlay XML
         run: |
-          printf '%s' "$GMS_CERT_PRIV" | base64 -d > releasekey_gms.pk8
-          printf '%s\n' "$GMS_CERT_PUB" > releasekey_gms.x509.pem
-          printf '%s' "$VANILLA_CERT_PRIV" | base64 -d > releasekey_vanilla.pk8
-          printf '%s\n' "$VANILLA_CERT_PUB" > releasekey_vanilla.x509.pem
+          python3 scripts/generate_overlay.py certified_build_props.json overlay
 
-      - name: Build overlay APK
+      - name: Compile & Link Overlay APK
         run: |
-          cd vendor_yaap/overlay/CertifiedPropsOverlay
-
-          mkdir -p compiled out
+          mkdir -p overlay/compiled out
 
           $ANDROID_HOME/build-tools/35.0.0/aapt2 compile \
-            --dir res \
-            -o compiled
+            --dir overlay/res \
+            -o overlay/compiled
 
           $ANDROID_HOME/build-tools/35.0.0/aapt2 link \
-            -o out/CertifiedPropsOverlay-unsigned.apk \
-            --min-sdk-version 24 \
+            -o out/certified_build_props-unsigned.apk \
+            --min-sdk-version 34 \
             --target-sdk-version 36 \
-            --manifest AndroidManifest.xml \
+            --manifest overlay/AndroidManifest.xml \
             -I $ANDROID_HOME/platforms/android-36/android.jar \
             --auto-add-overlay \
-            compiled/*.flat
+            overlay/compiled/*.flat
 
       - name: Zipalign APK
         run: |
           $ANDROID_HOME/build-tools/35.0.0/zipalign -f 4 \
-            vendor_yaap/overlay/CertifiedPropsOverlay/out/CertifiedPropsOverlay-unsigned.apk \
-            vendor_yaap/overlay/CertifiedPropsOverlay/out/CertifiedPropsOverlay-aligned.apk
+            out/certified_build_props-unsigned.apk \
+            out/certified_build_props-aligned.apk
 
-      - name: Sign APKs
+      - name: Setup Release Key & Sign APK
+        env:
+          RELEASE_KEY_PRIV: ${{ secrets.RELEASE_KEY_PRIV }}
+          RELEASE_KEY_PUB: ${{ secrets.RELEASE_KEY_PUB }}
         run: |
-          $ANDROID_HOME/build-tools/35.0.0/apksigner sign \
-            --key releasekey_gms.pk8 \
-            --cert releasekey_gms.x509.pem \
-            --out vendor_yaap/overlay/CertifiedPropsOverlay/out/CertifiedPropsOverlay-gms.apk \
-            vendor_yaap/overlay/CertifiedPropsOverlay/out/CertifiedPropsOverlay-aligned.apk
+          set -euo pipefail
 
-          $ANDROID_HOME/build-tools/35.0.0/apksigner sign \
-            --key releasekey_vanilla.pk8 \
-            --cert releasekey_vanilla.x509.pem \
-            --out vendor_yaap/overlay/CertifiedPropsOverlay/out/CertifiedPropsOverlay-vanilla.apk \
-            vendor_yaap/overlay/CertifiedPropsOverlay/out/CertifiedPropsOverlay-aligned.apk
+          if [ -n "${RELEASE_KEY_PRIV:-}" ] && [ -n "${RELEASE_KEY_PUB:-}" ]; then
+            echo "Signing with custom platform release key..."
+            python3 -c "import base64, os; s = ''.join(os.environ['RELEASE_KEY_PRIV'].split()); s += '=' * ((4 - len(s) % 4) % 4); open('releasekey.pk8', 'wb').write(base64.b64decode(s))"
+            printf '%s\n' "$RELEASE_KEY_PUB" | tr -d '\r' > releasekey.x509.pem
 
-      - name: Verify APK
-        run: |
-          $ANDROID_HOME/build-tools/35.0.0/apksigner verify -v \
-            vendor_yaap/overlay/CertifiedPropsOverlay/out/CertifiedPropsOverlay-gms.apk
+            $ANDROID_HOME/build-tools/35.0.0/apksigner sign \
+              --key releasekey.pk8 \
+              --cert releasekey.x509.pem \
+              --out out/certified_build_props.apk \
+              out/certified_build_props-aligned.apk
 
-          $ANDROID_HOME/build-tools/35.0.0/apksigner verify -v \
-            vendor_yaap/overlay/CertifiedPropsOverlay/out/CertifiedPropsOverlay-vanilla.apk
+            $ANDROID_HOME/build-tools/35.0.0/apksigner verify -v \
+              out/certified_build_props.apk
+          else
+            echo "::warning::RELEASE_KEY_PRIV / RELEASE_KEY_PUB secrets not set. Copying unsigned aligned APK as output artifact."
+            cp out/certified_build_props-aligned.apk out/certified_build_props.apk
+          fi
 
-      - name: Upload APK
+          cp certified_build_props.json out/
+
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: CertifiedPropsOverlay
-          path: |
-            vendor_yaap/overlay/CertifiedPropsOverlay/out/CertifiedPropsOverlay-gms.apk
-            vendor_yaap/overlay/CertifiedPropsOverlay/out/CertifiedPropsOverlay-vanilla.apk
+          path: out/
 
       - name: Generate release tag
         id: tag
         run: |
-          echo "tag=v$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+          echo "tag=v$(date +'%Y%m%d-%H%M%S')" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -166,10 +193,10 @@ jobs:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: CertifiedPropsOverlay ${{ steps.tag.outputs.tag }}
           files: |
-            vendor_yaap/overlay/CertifiedPropsOverlay/out/CertifiedPropsOverlay-gms.apk
-            vendor_yaap/overlay/CertifiedPropsOverlay/out/CertifiedPropsOverlay-vanilla.apk
+            out/certified_build_props.apk
+            out/certified_build_props.json
         env:
-          GITHUB_TOKEN: ${{ secrets.CERTS_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.CERTS_TOKEN || secrets.GITHUB_TOKEN }}
 
   push:
     needs: [check-version, build]
@@ -182,51 +209,38 @@ jobs:
           name: CertifiedPropsOverlay
           path: artifacts
 
-      - name: Push APKs to ota-info repo
+      - name: Push to OTA repo
         env:
-          LATEST_VER: ${{ needs.check-version.outputs.latest_ver }}
+          LATEST_FP: ${{ needs.check-version.outputs.latest_fp }}
+          CERTS_TOKEN: ${{ secrets.CERTS_TOKEN }}
         run: |
           set -euo pipefail
 
-          git config --global user.name "Sarthak Roy"
-          git config --global user.email "sarthakroy2002@gmail.com"
+          if [ -z "${CERTS_TOKEN:-}" ]; then
+            echo "CERTS_TOKEN secret not configured. Skipping repository push."
+            exit 0
+          fi
 
-          git clone "https://${GH_USERNAME}:${{ secrets.CERTS_TOKEN }}@github.com/yaap/ota-info.git"
+          git config --global user.name "Angaddeep Singh"
+          git config --global user.email "angxddeep@gmail.com"
 
-          cp artifacts/CertifiedPropsOverlay-gms.apk ota-info/cancunf/cert.apk
-          cp artifacts/CertifiedPropsOverlay-vanilla.apk ota-info/sunny/cert.apk
+          git clone "https://${GH_USERNAME}:${CERTS_TOKEN}@github.com/${OTA_REPO}.git" ota_repo
+          cd ota_repo
 
-          sed -i -E "s/(\"version\": )[0-9.]+/\1$LATEST_VER/" ota-info/cancunf/cert.json
-          sed -i -E "s/(\"version\": )[0-9.]+/\1$LATEST_VER/" ota-info/sunny/cert.json
+          for device in $TARGET_DEVICES; do
+            if git checkout "$device" 2>/dev/null; then
+              echo "Updating branch: $device"
+              find ../artifacts -type f -name "certified_build_props.apk" -exec cp {} ./ \;
+              find ../artifacts -type f -name "certified_build_props.json" -exec cp {} ./ \;
 
-          cd ota-info
-
-          git add cancunf
-          git commit -m "cancunf: Update certified fingerprint"
-          git push origin HEAD
-
-          git add sunny
-          git commit -m "sunny: Update certified fingerprint"
-          git push origin HEAD
-
-          git checkout vanilla-signed
-
-          cp ../artifacts/CertifiedPropsOverlay-vanilla.apk cancunf/cert.apk
-          cp ../artifacts/CertifiedPropsOverlay-vanilla.apk sunny/cert.apk
-
-          sed -i -E "s/(\"version\": )[0-9.]+/\1$LATEST_VER/" cancunf/cert.json
-          sed -i -E "s/(\"version\": )[0-9.]+/\1$LATEST_VER/" sunny/cert.json
-
-          git add cancunf
-          git commit -m "cancunf: Update certified fingerprint"
-          git push origin HEAD
-
-          git add sunny
-          git commit -m "sunny: Update certified fingerprint"
-          git push origin HEAD
-
-          tg() { curl -sX POST https://api.telegram.org/bot${{ secrets.TG_TOKEN }}/sendMessage -d chat_id=$1 -d text=$'New Certified Props has been pushed in YAAP. Use OpenDelta (YAAP Updater) to update it.\n\nSteps to do it are specified in the #yaap_pi note.\n\nFor the lazy dimwits who can\'t be arsed to check the note here are the steps for yall:\n\nSettings -> System -> YAAP Updater -> Click three dots -> Settings -> Scroll down to Props update and click it -> Click Props status and click update to install the new props and reboot to pass PI :)'; }
-
-          tg -1001864778887 # G54 Updates
-          tg -1002005479847 # G64 Updates
-          tg -1001729337901 # Fries
+              git add certified_build_props.apk certified_build_props.json
+              if git diff --staged --quiet; then
+                echo "No changes to commit on branch $device"
+              else
+                git commit -m "$device: Update certified props [$LATEST_FP]"
+                git push origin "$device"
+              fi
+            else
+              echo "Branch $device not found in $OTA_REPO, skipping."
+            fi
+          done
