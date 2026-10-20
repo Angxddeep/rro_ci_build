@@ -174,13 +174,13 @@ jobs:
             cp out/certified_build_props-aligned.apk out/certified_build_props.apk
           fi
 
+          cp certified_build_props.json out/
+
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: CertifiedPropsOverlay
-          path: |
-            out/certified_build_props.apk
-            certified_build_props.json
+          path: out/
 
       - name: Generate release tag
         id: tag
@@ -194,7 +194,7 @@ jobs:
           name: CertifiedPropsOverlay ${{ steps.tag.outputs.tag }}
           files: |
             out/certified_build_props.apk
-            certified_build_props.json
+            out/certified_build_props.json
         env:
           GITHUB_TOKEN: ${{ secrets.CERTS_TOKEN || secrets.GITHUB_TOKEN }}
 
@@ -230,8 +230,8 @@ jobs:
           for device in $TARGET_DEVICES; do
             if git checkout "$device" 2>/dev/null; then
               echo "Updating branch: $device"
-              cp ../artifacts/certified_build_props.apk ./
-              cp ../artifacts/certified_build_props.json ./
+              find ../artifacts -type f -name "certified_build_props.apk" -exec cp {} ./ \;
+              find ../artifacts -type f -name "certified_build_props.json" -exec cp {} ./ \;
 
               git add certified_build_props.apk certified_build_props.json
               if git diff --staged --quiet; then
